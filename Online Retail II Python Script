@@ -1,0 +1,474 @@
+#Online Retail II dataset analysis
+#importing relevant libraries & setting relevant plot libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+plt.rcParams.update({
+    'figure.dpi': 130,
+    'axes.spines.top': False,
+    'axes.spines.right': False,
+    'axes.titlesize': 13,
+    'axes.titleweight': 'bold',
+    'axes.labelsize': 11,
+    'font.family': 'DejaVu Sans',
+})
+PALETTE = ['#1F3864', '#2E75B6', '#5BA3D9', '#BDD7EE', "#03BFF3"]
+
+print('Libraries loaded.')
+#load & inspect
+FILE = 'online_retail_II.xlsx'
+
+df_2009 = pd.read_excel(FILE, sheet_name='Year 2009-2010', dtype={'Customer ID': str})
+df_2010 = pd.read_excel(FILE, sheet_name='Year 2010-2011', dtype={'Customer ID': str})
+
+df_raw = pd.concat([df_2009, df_2010], ignore_index=True)
+
+print(f'Combined shape: {df_raw.shape}')
+print(f'Columns: {df_raw.columns.tolist()}')
+print(f'Data Types: {df_raw.dtypes}')
+print(f'Numeric Summary: {df_raw[["Quantity", "Price"]].describe()}')
+
+#cleaning & validating
+#nulls
+nullcount = df_raw.isnull().sum()
+nullpercent = (nullcount / len(df_raw) * 100).round(2)
+
+dq = pd.DataFrame({'Null Count': nullcount, 'Null %': nullpercent})
+dq = dq[dq['Null Count'] > 0]
+print('Null Summary:')
+print(dq.to_string())
+
+#cancelled orders, returned stock, incorrect prices.
+cancelled = df_raw['Invoice'].astype(str).str.startswith('C')
+print(f'Cancelled Orders: {cancelled.sum():,} ({cancelled.mean()*100:.1f}% of rows)')
+
+returned = df_raw['Quantity'] < 0
+print(f'Returned Orders: {returned.sum():,} ({returned.mean()*100:.1f}% of rows)')
+
+priceerror = df_raw['Price'] < 0
+print(f'Price Error: {priceerror.sum():,} ({priceerror.mean()*100:.1f}% of rows)')
+
+#duplicates
+duplicates = df_raw.duplicated().sum()
+print(f'Duplicate Rows: {duplicates:,}')
+
+#cleaning data (making copy first)
+df = df_raw.copy()
+
+#fixing datetime
+df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'])
+
+#removing cancelled orders
+df = df[~df['Invoice'].astype(str).str.startswith('C')]
+
+#removing returns & price errors
+df = df[(df['Quantity'] > 0) & (df['Price'] > 0)]
+
+#removing duplicates
+df = df.drop_duplicates()
+
+#dropping description nulls
+df = df.dropna(subset=['Description'])
+
+#adding revenue column
+df['Revenue'] = df['Quantity'] * df['Price']
+
+#separating date & time
+df['Year'] = df['InvoiceDate'].dt.year
+df['Month'] = df['InvoiceDate'].dt.month
+df['YearMonth'] = df['InvoiceDate'].dt.to_period('M')
+
+#creating a separate dataset where Customer ID is not null for customer-level analysis
+df_customers = df.dropna(subset=['Customer ID'])
+
+print(f'Clean Data: {df.shape[0]:,} rows | {df['Revenue'].sum():,.0f} total revenue')
+print(f'Customer Rows: {len(df_customers):,} ({len(df_customers)/len(df)*100:.1f}%)')
+df.head()
+
+#data quality summary
+total_raw = len(df_raw)
+
+dqsummary = pd.DataFrame ({
+    'Issue':[
+        'Cancelled Invoices (prefix C)',
+        'Negative or Zero Quantity',
+        'Negative or Zero Price',
+        'Exact Duplicate Rows',
+        'Null Customer ID',
+        'Null Description',
+    ],
+    'Count': [
+        df_raw['Invoice'].astype(str).str.startswith('C').sum(),
+        (df_raw['Quantity'] <= 0).sum(),
+        (df_raw['Price'] <= 0).sum(),
+        df_raw.duplicated().sum(),
+        df_raw['Customer ID'].isnull().sum(),
+        df_raw['Description'].isnull().sum(),
+    ]
+})
+dqsummary['% of Raw'] = (dqsummary['Count'] / total_raw * 100).round(2)
+dqsummary['Action'] = [
+    'Excluded from revenue analysis',
+    'Excluded',
+    'Excluded',
+    'Dropped',
+    'Retaned for product.country; excluded from customer analysis',
+    'Dropped (negligible)',
+] 
+print('Data Quality Summary')
+print (dqsummary.to_string(index=False)) 
+
+#univariate analysis
+#revenue distribution
+fig, axes = plt.subplots(1, 3, figsize=(8, 2))
+
+axes[0].hist(np.log1p(df['Revenue']), bins=60, color=PALETTE[1], edgecolor='white')
+axes[0].set_title('Revenue Distribution (log scale)')
+axes[0].set_xlabel('log(1 + Revenue)')
+axes[0].set_ylabel('Frequency')
+
+axes[1].hist(df['Quantity'].clip(upper=200), bins=60, color=PALETTE[2], edgecolor='white')
+axes[1].set_title('Quantity per line (clipped at 200)')
+axes[1].set_xlabel('Quantity')
+
+axes[2].hist(df['Price'].clip(upper=50), bins=60, color=PALETTE[3], edgecolor='white')
+axes[2].set_title('Unit Price (clipped at $50)')
+axes[2].set_xlabel('Price ($)')
+
+plt.suptitle('Univariate distribution', fontsize=14, fontweight='bold', y=0.9)
+plt.tight_layout()
+plt.show()
+
+#top 10 countries by transaction
+topcountriesbytransaction = df['Country'].value_counts().head(10)
+print('Top 10 Countries by Transaction Count:')
+print(topcountriesbytransaction.to_string())
+
+#bivariate analysis
+#revenue by month (time series)
+monthly = (
+    df.groupby('YearMonth')['Revenue']
+    .sum()
+    .reset_index()
+)
+monthly['YearMonth'] = monthly['YearMonth'].dt.to_timestamp()
+monthly['MoM_pct'] = monthly['Revenue'].pct_change() * 100
+
+fig, ax = plt.subplots(figsize=(14, 5))
+ax.fill_between(monthly['YearMonth'], monthly['Revenue'], alpha=0.15, color=PALETTE[1])
+ax.plot(monthly['YearMonth'], monthly['Revenue'], color=PALETTE[0], linewidth=2, marker='o', markersize=4)
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+ax.set_title('Monthly Revenue Trend', pad=12)
+ax.set_xlabel('')
+ax.set_ylabel('Revenue')
+plt.tight_layout()
+plt.show()
+
+print('\nMonth on Month % change')
+print(monthly[['YearMonth', 'Revenue', 'MoM_pct']].tail(12).to_string(index=False))
+
+#revenue by country (excluding the UK)
+countryrevnotuk = (
+    df.groupby('Country')['Revenue']
+    .sum()
+    .sort_values(ascending=False)
+)
+
+fig, axes = plt.subplots(1,2, figsize=(15, 3))
+
+#revenue for all countries
+countryrevall = countryrevnotuk.head(10)
+axes[0].barh(countryrevall.index[::-1], countryrevall[::-1], color=PALETTE[1])
+axes[0].xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+axes[0].set_title('Top 10 countries by revenue')
+axes[0].set_xlabel('Revenue')
+
+#revenue for countries excluding uk
+countryrevnotuk = countryrevnotuk.drop('United Kingdom', errors='ignore').head(10)
+axes[1].barh(countryrevnotuk.index[::-1], countryrevnotuk[::-1], color=PALETTE[2])
+axes[1].xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e3:.0f}K'))
+axes[1].set_title('Top 10 countries by revenue excluding the UK')
+axes[1].set_xlabel('Revenue')
+
+plt.tight_layout()
+plt.show()
+
+#top 20 products by revenue
+productrevenue = (
+    df.groupby(['StockCode', 'Description'])['Revenue']
+    .sum()
+    .sort_values(ascending=False)
+    .reset_index()
+)
+productrevenue['Cumulative %'] = (
+    productrevenue['Revenue'].cumsum() / productrevenue['Revenue'].sum() * 100
+).round(2)
+
+top20productrev = productrevenue.head(20).copy()
+top20productrev['Revenue'] = top20productrev['Revenue'].map('${:,.0f}'.format)
+
+print('Top 20 products by revenue')
+print(top20productrev.to_string(index=False))
+
+#pareto chart of product revenue
+top_n = 30
+plot_data = productrevenue.head(top_n)
+
+fig, ax1 = plt.subplots(figsize=(14, 5))
+ax2 = ax1.twinx()
+
+ax1.bar(range(top_n), plot_data['Revenue'], color=PALETTE[1], label='Revenue')
+ax2.plot(range(top_n), plot_data['Cumulative %'], color=PALETTE[0], linewidth=2, marker='o', markersize=3, label='Cumulative')
+ax2.axhline(80, color='red', linestyle='--', linewidth=1, alpha=0.6, label='80% threshold')
+ax1.set_xticks(range(top_n))
+ax1.set_xticklabels(plot_data['Description'].str[:20], rotation=45, ha='right', fontsize=8)
+ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e3:.0f}K'))
+ax1.set_ylabel('Revenue', color=PALETTE[1])
+ax2.set_ylabel('Cumulative Revenue %', color=PALETTE[0])
+ax2.set_ylim(0, 105)
+
+#labelling the 80% crossover point
+cross = (plot_data['Cumulative %'] >= 80).idxmax()
+ax2.annotate(f'{cross+1} products - 80% revenue',
+             xy=(cross, 80), xytext=(cross+2, 70),
+             arrowprops=dict(arrowstyle='->', color = 'red'), color='red', fontsize=9)
+
+ax1.set_title('BQ1 - Pareto Chart showing top 30 product revenue', pad=12)
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+
+plt.tight_layout()
+plt.show()
+
+#products that make up the 80% of revenue
+n_80 = (productrevenue['Cumulative %'] <= 80).sum() + 1
+totalproducts = len(productrevenue)
+print(f'\n{n_80} products ({n_80/totalproducts*100:.1f}% of catalogue) generate 80% of total revenue')
+
+#bottom 20 products (excluding products with 1-2 transactions)
+prodcount = df.groupby('StockCode')['Revenue'].agg(['sum', 'count']).reset_index()
+prodcount.columns = ['StockCode', 'Revenue', 'Transactions']
+underperformers = (
+    prodcount[prodcount['Transactions'] >= 10]
+    .merge(df[['StockCode', 'Description']].drop_duplicates(), on='StockCode')
+    .sort_values('Revenue')
+    .head(20)
+)
+print('Bottom 20 products by revenue')
+print(underperformers[['StockCode', 'Description', 'Revenue', 'Transactions']].to_string(index=False))
+
+#monthly reveneue with MoM labels
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+
+#revenue line
+ax1.fill_between(monthly['YearMonth'], monthly['Revenue'], alpha=0.15, color=PALETTE[1])
+ax1.plot(monthly['YearMonth'], monthly['Revenue'], color=PALETTE[0], linewidth=2, marker='o', markersize=4)
+ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+ax1.set_ylabel('Monthly Revenue')
+ax1.set_title('BQ2 - Monthly Revenue Trend', pad=12)
+
+#MoM percentage chart
+colors = [PALETTE[1] if x >= 0 else '#C0392B' for x in monthly['MoM_pct'].fillna(0)]
+ax2.bar(monthly['YearMonth'], monthly['MoM_pct'].fillna(0), color=colors, width=20)
+ax2.axhline(0, color='black', linewidth=0.8)
+ax2.set_ylabel('MoM %')
+ax2.set_title('MoM Revenue Change %', pad=8)
+
+plt.tight_layout()
+plt.show()
+
+#average revenue by month
+seasonal = (
+    df.groupby('Month')['Revenue']
+    .sum()
+    .reset_index()
+)
+month_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+seasonal['MonthName'] = seasonal['Month'].apply(lambda x: month_labels[x-1])
+
+fig, ax = plt.subplots(figsize=(11, 4))
+bars =ax.bar(seasonal['MonthName'], seasonal['Revenue'], color=[PALETTE[0] if r == seasonal['Revenue'].max() else PALETTE[2] for r in seasonal['Revenue']])
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+ax.set_title('BQ2 - seasonal revenue pattern', pad=12)
+ax.set_xlabel('Month')
+
+#labelling peak
+peakid = seasonal['Revenue'].idxmax()
+ax.annotate('Peak', xy=(peakid, seasonal['Revenue'].iloc[peakid]), xytext=(peakid, seasonal['Revenue'].iloc[peakid]*1.05), ha='center', fontsize=9, color=PALETTE[0], fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+
+print('\nRevenue by month:')
+print(seasonal[['MonthName', 'Revenue']].to_string(index=False))
+
+#Customer Revenue Pareto chart
+custrev = (
+    df_customers.groupby('Customer ID')['Revenue']
+    .sum()
+    .sort_values(ascending=False)
+    .reset_index()
+)
+custrev['Cumulative %'] = (custrev['Revenue'].cumsum() / custrev['Revenue'].sum() * 100)
+custrev['Customer Rank %'] = (custrev.index + 1) / len(custrev) * 100
+
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.plot(custrev['Customer Rank %'], custrev['Cumulative %'], color=PALETTE[0], linewidth=2)
+ax.plot([0, 100], [0, 100], 'k--', linewidth=1, alpha=0.4, label='Perfect equality')
+ax.axvline(20, color='red', linestyle='--', linewidth=1, alpha=0.6)
+ax.axhline(80, color='red', linestyle='--', linewidth=1, alpha=0.6)
+
+#revenue from top 20%
+top20custrev = custrev[custrev['Customer Rank %'] <= 20]['Cumulative %'].max()
+ax.annotate(f'Top 20% of customers\n= {top20custrev:.1f}% of revenue', xy=(20, top20custrev), xytext=(30, top20custrev - 15), arrowprops=dict(arrowstyle='->', color='red'), color='red', fontsize=9)
+ax.set_xlabel('Cumulative % of customers ranked by revenue')
+ax.set_ylabel('Cumulative % of Revenue')
+ax.set_title('BQ3 - Customer Revenue Concentration', pad=12)
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print(f'Top 20% of customers account for {top20custrev:.1f}% of total revenue')
+
+#RFM analysis
+snapshotdate = df_customers['InvoiceDate'].max() + pd.Timedelta(days=1)
+
+rfm = df_customers.groupby('Customer ID').agg(
+    Recency = ('InvoiceDate', lambda x: (snapshotdate - x.max()).days),
+    Frequency = ('Invoice', 'nunique'),
+    Monetary = ('Revenue', 'sum')
+).reset_index()
+
+#scoring each dimension 1-5 (5 being best)
+rfm['RScore'] = pd.qcut(rfm['Recency'], 5, labels=[5, 4, 3, 2, 1])
+rfm['FScore'] = pd.qcut(rfm['Frequency'].rank(method='first'), 5, labels=[1, 2, 3, 4, 5])
+rfm['MScore'] = pd.qcut(rfm['Monetary'].rank(method='first'), 5, labels=[1, 2, 3, 4, 5])
+
+rfm['RFMscore'] = (
+    rfm['RScore'].astype(int) + 
+    rfm['FScore'].astype(int) +
+    rfm['MScore'].astype(int)
+)
+
+#segment
+
+def rfmsegment(score):
+    if score >= 13: return 'Champions'
+    elif score >= 10: return 'Loyal Customers'
+    elif score >= 7: return 'Potential Loyalists'
+    elif score >= 5: return 'At Risk'
+    else: return 'Lost'
+
+rfm['Segment'] = rfm ['RFMscore'].apply(rfmsegment)
+
+rfmsummary = (
+    rfm.groupby('Segment')
+    .agg(
+        Customers = ('Customer ID', 'count'),
+        Avg_Recency = ('Recency', 'mean'),
+        Avg_Frequency = ('Frequency', 'mean'),
+        Avg_Monetary = ('Monetary', 'mean'),
+        Total_Revenue = ('Monetary', 'sum'),
+    )
+    .round(1)
+    .sort_values('Total_Revenue', ascending=False)
+    .reset_index()
+)
+
+print('RFM segment summary')
+print(rfmsummary.to_string(index=False))
+
+#RFM segment chart
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+segorder = ['Champions', 'Loyal Customers', 'Potential Loyallists', 'At Risk', 'Lost']
+segcolors = PALETTE[:len(segorder)]
+
+#customers per segment
+custcount = rfm['Segment'].value_counts().reindex(segorder).fillna(0)
+ax1.barh(segorder[::-1], [custcount[s] for s in segorder[::-1]], color=segcolors[::-1])
+ax1.set_xlabel('Number of customers')
+ax1.set_title('Customers per RFM segment')
+
+#Revenue per segment
+segrev = rfm.groupby('Segment')['Monetary'].sum().reindex(segorder).fillna(0)
+ax2.barh(segorder[::-1], [segrev[s] for s in segorder[::-1]], color=segcolors[::-1])
+ax1.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x/1e6:.1f}M'))
+ax2.set_xlabel('Total Revenue')
+ax2.set_title('Revenue per RFM Segment')
+
+plt.suptitle('BQ3 - RFM Customer segmentation', fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+#revenue by country (period on period comparison -  split into 2 for comparison)
+middate = df['InvoiceDate'].median()
+df['Period'] = np.where(df['InvoiceDate'] < middate, 'Period 1', 'Period 2')
+
+countryperiod = (
+    df.groupby(['Country', 'Period'])['Revenue']
+    .sum()
+    .unstack(fill_value=0)
+    .reset_index()
+)
+countryperiod.columns.name = None
+countryperiod['Delta$'] = countryperiod['Period 2'] - countryperiod['Period 1']
+countryperiod['Delta%'] = (
+    (countryperiod['Period 2'] - countryperiod['Period 1']) / countryperiod['Period 1'].replace(0, np.nan) * 100
+).round(1)
+countryperiod['Total'] = countryperiod['Period 1'] + countryperiod['Period 2']
+
+top15countries = countryperiod.nlargest(15, 'Total')
+
+print('BQ4 - Country revenue (period 1 v period 2)')
+print(top15countries[
+    ['Country', 'Period 1', 'Period 2', 'Delta$', 'Delta%']
+].to_string(index=False))
+
+#country delta chart
+countrydelta = (
+    countryperiod[countryperiod['Country'] != 'United Kingdom']
+    .nlargest(15, 'Total')
+    .sort_values('Delta%')
+)
+
+fig, ax = plt.subplots(figsize=(11, 6))
+colors = [PALETTE[1] if d >= 0 else '#C0392B' for d in countrydelta['Delta%']]
+ax.barh(countrydelta['Country'], countrydelta['Delta%'], color=colors)
+ax.axvline(0, color='black', linewidth=0.8)
+ax.set_xlabel('revenue growth% (period 1 to period 2)')
+ax.set_title('BQ4 - country revenue growth/decline, pad=12')
+plt.tight_layout()
+plt.show()
+
+#summary
+totalrevenue = df['Revenue'].sum()
+totalcustomers = df_customers['Customer ID'].nunique()
+totalproducts = df['StockCode'].nunique()
+totalcountries = df['Country'].nunique()
+cancellationrate = (df_raw['Invoice'].astype(str).str.startswith('C').sum() / len(df_raw) * 100)
+peakmonth = monthly.loc[monthly['Revenue'].idxmax(), 'YearMonth']
+topproduct = productrevenue.iloc[0]['Description']
+topproductrevenue = productrevenue.iloc[0]['Revenue']
+topcountry = countryrevall.index[0]
+topcountryshare = countryrevall.iloc[0] / countryrevall.sum() * 100
+championsrevenueshare = (rfm[rfm['Segment'] == 'Champions']['Monetary'].sum() / rfm['Monetary'].sum() + 100)
+
+print(f'Total revenue: ${totalrevenue:>12,.0f}')
+print(f'Unique customers: {totalcustomers:>12,}')
+print(f'Unique Products: {totalproducts:>12,}')
+print(f'Countries: {totalcountries:>12,}')
+print(f'Cancellation Rate: {cancellationrate:>11.1f}%')
+print(f'BQ1 — Top Product: {topproduct[:30]}')
+print(f'      Revenue: ${topproductrevenue:>12,.0f}')
+print(f'      80/20 split: {n_80} products drive 80% of revenue')
+print(f'BQ2 — Peak Month: {peakmonth}')
+print(f'BQ3 — Top 20% customers: {top20custrev:.1f}% of revenue')
+print(f'      Champions segment: {championsrevenueshare:.1f}% of revenue')
+print(f'BQ4 — Top Market: {topcountry} ({topcountryshare:.1f}% of revenue)')
